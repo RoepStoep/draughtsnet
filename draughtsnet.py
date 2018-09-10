@@ -362,7 +362,7 @@ def recv_uci(p):
 
 
 def uci(p):
-    send(p, "uci")
+    send(p, "hub")
 
     engine_info = {}
     variants = set()
@@ -370,22 +370,43 @@ def uci(p):
     while True:
         command, arg = recv_uci(p)
 
-        if command == "uciok":
+        if command == "wait":
             return engine_info, variants
         elif command == "id":
-            name_and_value = arg.split(None, 1)
-            if len(name_and_value) == 2:
-                engine_info[name_and_value[0]] = name_and_value[1]
-        elif command == "option":
-            if arg.startswith("name UCI_Variant type combo default chess"):
-                for variant in arg.split(" ")[6:]:
-                    if variant != "var":
-                        variants.add(variant)
-        elif command == "Stockfish" and " by " in arg:
-            # Ignore identification line
-            pass
+            parts = arg.split()
+            i = 0
+            while i < len(parts):
+                name_and_value = parts[i].split("=", 1)
+                if len(name_and_value) == 2:
+                    value = name_and_value[1]
+                    if value.startswith("\""):
+                        value = value[1:]
+                        i += 1
+                        while i < len(parts) and not parts[i].endswith("\""):
+                            value += " " + parts[i]
+                            i += 1
+                        value += " " + parts[i][:-1]
+                    engine_info[name_and_value[0]] = value
+                i += 1
+        elif command == "param":
+            if arg.startswith("name=variant") and arg.find("type=enum") != -1:
+                argvalues = arg.split("=")[-1].replace("\"", "")
+                for variant in argvalues.split():
+                    variants.add(variant)
         else:
             logging.warning("Unexpected engine response to uci: %s %s", command, arg)
+
+
+def init(p):
+    send(p, "init")
+    while True:
+        command, arg = recv_uci(p)
+        if command == "ready":
+            break
+        elif command == "init":
+            pass
+        else:
+            logging.warning("Unexpected engine response to init: %s %s", command, arg)
 
 
 def isready(p):
@@ -578,9 +599,9 @@ class Worker(threading.Thread):
         self.nodes = 0
         self.positions = 0
 
-        self.stockfish_lock = threading.RLock()
-        self.stockfish = None
-        self.stockfish_info = None
+        self.scan_lock = threading.RLock()
+        self.scan = None
+        self.scan_info = None
 
         self.job = None
         self.backoff = start_backoff(self.conf)
@@ -596,7 +617,7 @@ class Worker(threading.Thread):
     def stop(self):
         with self.status_lock:
             self.alive = False
-            self.kill_stockfish()
+            self.kill_scan()
             self.sleep.set()
 
     def stop_soon(self):
@@ -623,7 +644,7 @@ class Worker(threading.Thread):
     def run_inner(self):
         try:
             # Check if the engine is still alive and start, if necessary
-            self.start_stockfish()
+            self.start_scan()
 
             # Do the next work unit
             path, request = self.work()
@@ -638,7 +659,7 @@ class Worker(threading.Thread):
 
             if alive:
                 self.sleep.wait(t)
-                self.kill_stockfish()
+                self.kill_scan()
 
             return
 
@@ -707,56 +728,52 @@ class Worker(threading.Thread):
 
         self.job = None
 
-    def kill_stockfish(self):
-        with self.stockfish_lock:
-            if self.stockfish:
+    def kill_scan(self):
+        with self.scan_lock:
+            if self.scan:
                 try:
-                    kill_process(self.stockfish)
+                    kill_process(self.scan)
                 except OSError:
                     logging.exception("Failed to kill engine process.")
-                self.stockfish = None
+                self.scan = None
 
-    def start_stockfish(self):
-        with self.stockfish_lock:
+    def start_scan(self):
+        with self.scan_lock:
             # Check if already running.
-            if self.stockfish and self.stockfish.poll() is None:
+            if self.scan and self.scan.poll() is None:
                 return
 
             # Start process
-            self.stockfish = open_process(get_stockfish_command(self.conf, False),
+            self.scan = open_process(get_scan_command(self.conf, False),
                                           get_engine_dir(self.conf))
 
-        self.stockfish_info, _ = uci(self.stockfish)
-        self.stockfish_info.pop("author", None)
+        self.scan_info, _ = uci(self.scan)
         logging.info("Started %s, threads: %s (%d), pid: %d",
-                     self.stockfish_info.get("name", "Stockfish <?>"),
-                     "+" * self.threads, self.threads, self.stockfish.pid)
+                     self.scan_info.get("name", "Scan <?>"),
+                     "+" * self.threads, self.threads, self.scan.pid)
 
         # Prepare UCI options
-        self.stockfish_info["options"] = {}
-        self.stockfish_info["options"]["threads"] = str(self.threads)
-        self.stockfish_info["options"]["hash"] = str(self.memory)
-        self.stockfish_info["options"]["analysis contempt"] = "Off"
+        self.scan_info["options"] = {}
 
         # Custom options
-        if self.conf.has_section("Stockfish"):
-            for name, value in self.conf.items("Stockfish"):
-                self.stockfish_info["options"][name] = value
+        if self.conf.has_section("Scan"):
+            for name, value in self.conf.items("Scan"):
+                self.scan_info["options"][name] = value
 
         # Set UCI options
-        for name, value in self.stockfish_info["options"].items():
-            setoption(self.stockfish, name, value)
+        for name, value in self.scan_info["options"].items():
+            setoption(self.scan, name, value)
 
-        isready(self.stockfish)
+        init(self.scan)
 
     def make_request(self):
         return {
-            "fishnet": {
+            "draughtsnet": {
                 "version": __version__,
                 "python": platform.python_version(),
                 "apikey": get_key(self.conf),
             },
-            "stockfish": self.stockfish_info,
+            "scan": self.scan_info,
         }
 
     def work(self):
@@ -794,16 +811,16 @@ class Worker(threading.Thread):
         logging.debug("Playing %s (%s) with lvl %d",
                       self.job_name(job), variant, lvl)
 
-        set_variant_options(self.stockfish, job.get("variant", "standard"))
-        setoption(self.stockfish, "Skill Level", LVL_SKILL[lvl - 1])
-        setoption(self.stockfish, "UCI_AnalyseMode", False)
-        send(self.stockfish, "ucinewgame")
-        isready(self.stockfish)
+        set_variant_options(self.scan, job.get("variant", "standard"))
+        setoption(self.scan, "Skill Level", LVL_SKILL[lvl - 1])
+        setoption(self.scan, "UCI_AnalyseMode", False)
+        send(self.scan, "ucinewgame")
+        isready(self.scan)
 
         movetime = int(round(LVL_MOVETIMES[lvl - 1] / (self.threads * 0.9 ** (self.threads - 1))))
 
         start = time.time()
-        part = go(self.stockfish, job["position"], moves,
+        part = go(self.scan, job["position"], moves,
                   movetime=movetime, clock=job["work"].get("clock"),
                   depth=LVL_DEPTHS[lvl - 1])
         end = time.time()
@@ -829,11 +846,11 @@ class Worker(threading.Thread):
         result["analysis"] = [None for _ in range(len(moves) + 1)]
         start = last_progress_report = time.time()
 
-        set_variant_options(self.stockfish, variant)
-        setoption(self.stockfish, "Skill Level", 20)
-        setoption(self.stockfish, "UCI_AnalyseMode", True)
-        send(self.stockfish, "ucinewgame")
-        isready(self.stockfish)
+        set_variant_options(self.scan, variant)
+        setoption(self.scan, "Skill Level", 20)
+        setoption(self.scan, "UCI_AnalyseMode", True)
+        send(self.scan, "ucinewgame")
+        isready(self.scan)
 
         nodes = job.get("nodes") or 3500000
         skip = job.get("skipPositions", [])
@@ -853,7 +870,7 @@ class Worker(threading.Thread):
             logging.log(PROGRESS, "Analysing %s: %s",
                         variant, self.job_name(job, ply))
 
-            part = go(self.stockfish, job["position"], moves[0:ply],
+            part = go(self.scan, job["position"], moves[0:ply],
                       nodes=nodes, movetime=4000)
 
             if "mate" not in part["score"] and "time" in part and part["time"] < 100:
@@ -936,29 +953,19 @@ def detect_cpu_capabilities():
     return vendor, modern, bmi2
 
 
-def stockfish_filename():
+def scan_filename():
     machine = platform.machine().lower()
 
-    vendor, modern, bmi2 = detect_cpu_capabilities()
-    if modern and "Intel" in vendor and bmi2:
-        suffix = "-bmi2"
-    elif modern:
-        suffix = "-modern"
-    else:
-        suffix = ""
-
     if os.name == "nt":
-        return "stockfish-windows-%s%s.exe" % (machine, suffix)
-    elif os.name == "os2" or sys.platform == "darwin":
-        return "stockfish-osx-%s" % machine
-    elif os.name == "posix":
-        return "stockfish-%s%s" % (machine, suffix)
+        return "scan.exe"
+    else:
+        return "scan"
 
 
 def load_conf(args):
     conf = configparser.ConfigParser()
     conf.add_section("Draughtsnet")
-    conf.add_section("Stockfish")
+    conf.add_section("Scan")
 
     if not args.no_conf:
         if not args.conf and not os.path.isfile(DEFAULT_CONFIG):
@@ -972,8 +979,8 @@ def load_conf(args):
 
     if hasattr(args, "engine_dir") and args.engine_dir is not None:
         conf.set("Draughtsnet", "EngineDir", args.engine_dir)
-    if hasattr(args, "stockfish_command") and args.stockfish_command is not None:
-        conf.set("Draughtsnet", "StockfishCommand", args.stockfish_command)
+    if hasattr(args, "scan_command") and args.scan_command is not None:
+        conf.set("Draughtsnet", "ScanCommand", args.scan_command)
     if hasattr(args, "key") and args.key is not None:
         conf.set("Draughtsnet", "Key", args.key)
     if hasattr(args, "cores") and args.cores is not None:
@@ -987,7 +994,7 @@ def load_conf(args):
     if hasattr(args, "fixed_backoff") and args.fixed_backoff is not None:
         conf.set("Draughtsnet", "FixedBackoff", str(args.fixed_backoff))
     for option_name, option_value in args.setoption:
-        conf.set("Stockfish", option_name.lower(), option_value)
+        conf.set("Scan", option_name.lower(), option_value)
 
     logging.getLogger().addFilter(CensorLogFilter(conf_get(conf, "Key")))
 
@@ -1029,7 +1036,7 @@ def configure(args):
 
     conf = configparser.ConfigParser()
     conf.add_section("Draughtsnet")
-    conf.add_section("Stockfish")
+    conf.add_section("Scan")
 
     # Ensure the config file is going to be writable
     config_file = os.path.abspath(args.conf or DEFAULT_CONFIG)
@@ -1049,13 +1056,11 @@ def configure(args):
 
     # Scan command
     print(file=out)
-    stockfish_command = config_input("Path or command (will download by default): ",
-                                     lambda v: validate_stockfish_command(v, conf),
+    scan_command = config_input("Command to run scan in hub mode (default: scan.exe hub): ",
+                                     lambda v: validate_scan_command(v, conf),
                                      out)
-    if not stockfish_command:
-        conf.remove_option("Draughtsnet", "StockfishCommand")
-    else:
-        conf.set("Draughtsnet", "StockfishCommand", stockfish_command)
+
+    conf.set("Draughtsnet", "ScanCommand", scan_command)
     print(file=out)
 
     # Cores
@@ -1112,27 +1117,27 @@ def validate_engine_dir(engine_dir):
     return engine_dir
 
 
-def validate_stockfish_command(stockfish_command, conf):
-    if not stockfish_command or not stockfish_command.strip() or stockfish_command.strip().lower() == "download":
-        return None
+def validate_scan_command(scan_command, conf):
+    if not scan_command or not scan_command.strip():
+        scan_command = "scan.exe hub"
 
-    stockfish_command = stockfish_command.strip()
+    scan_command = scan_command.strip()
     engine_dir = get_engine_dir(conf)
 
     # Ensure the required options are supported
-    process = open_process(stockfish_command, engine_dir)
+    process = open_process(scan_command, engine_dir)
     _, variants = uci(process)
     kill_process(process)
 
     logging.debug("Supported variants: %s", ", ".join(variants))
 
-    required_variants = set(["chess", "giveaway", "atomic", "crazyhouse", "horde",  "kingofthehill", "racingkings", "3check"])
+    required_variants = set(["normal"])
     missing_variants = required_variants.difference(variants)
     if missing_variants:
-        raise ConfigError("Ensure you are using lichess custom Stockfish. "
+        raise ConfigError("Ensure you are using Scan 3.0. "
                           "Unsupported variants: %s" % ", ".join(missing_variants))
 
-    return stockfish_command
+    return scan_command
 
 
 def parse_bool(inp, default=False):
@@ -1266,13 +1271,13 @@ def get_engine_dir(conf):
     return validate_engine_dir(conf_get(conf, "EngineDir"))
 
 
-def get_stockfish_command(conf, update=True):
-    stockfish_command = validate_stockfish_command(conf_get(conf, "StockfishCommand"), conf)
-    if not stockfish_command:
-        filename = stockfish_filename()
-        return validate_stockfish_command(os.path.join(".", filename), conf)
+def get_scan_command(conf, update=True):
+    scan_command = validate_scan_command(conf_get(conf, "ScanCommand"), conf)
+    if not scan_command:
+        filename = scan_filename() + " hub"
+        return validate_scan_command(os.path.join(".", filename), conf)
     else:
-        return stockfish_command
+        return scan_command
 
 
 def get_endpoint(conf, sub=""):
@@ -1282,7 +1287,7 @@ def get_endpoint(conf, sub=""):
 def is_production_endpoint(conf):
     endpoint = validate_endpoint(conf_get(conf, "Endpoint"))
     hostname = urlparse.urlparse(endpoint).hostname
-    return hostname == "lichess.org" or hostname.endswith(".lichess.org")
+    return hostname == "lidraughts.org" or hostname.endswith(".lidraughts.org")
 
 
 def get_key(conf):
@@ -1303,19 +1308,17 @@ def start_backoff(conf):
 def cmd_run(args):
     conf = load_conf(args)
 
-    stockfish_command = validate_stockfish_command(conf_get(conf, "StockfishCommand"), conf)
-    if not stockfish_command:
-        print()
-        print("### Updating Stockfish ...")
-        print()
-        stockfish_command = get_stockfish_command(conf)
+    scan_command = validate_scan_command(conf_get(conf, "ScanCommand"), conf)
+    if not scan_command:
+        raise ConfigError("Ensure you are using Scan 3.0. "
+                          "Invalid command: %s" % scan_command)
 
     print()
     print("### Checking configuration ...")
     print()
     print("Python:           %s (with requests %s)" % (platform.python_version(), requests.__version__))
     print("EngineDir:        %s" % get_engine_dir(conf))
-    print("StockfishCommand: %s" % stockfish_command)
+    print("ScanCommand:      %s" % scan_command)
     print("Key:              %s" % (("*" * len(get_key(conf))) or "(none)"))
 
     cores = validate_cores(conf_get(conf, "Cores"))
@@ -1332,9 +1335,9 @@ def cmd_run(args):
     print("FixedBackoff:     %s" % parse_bool(conf_get(conf, "FixedBackoff")))
     print()
 
-    if conf.has_section("Stockfish") and conf.items("Stockfish"):
-        print("Using custom UCI options is discouraged:")
-        for name, value in conf.items("Stockfish"):
+    if conf.has_section("Scan") and conf.items("Scan"):
+        print("Using custom engine options is discouraged:")
+        for name, value in conf.items("Scan"):
             if name.lower() == "hash":
                 hint = " (use --memory instead)"
             elif name.lower() == "threads":
@@ -1475,9 +1478,9 @@ def cmd_systemd(args):
     if args.engine_dir is not None:
         builder.append("--engine-dir")
         builder.append(shell_quote(validate_engine_dir(args.engine_dir)))
-    if args.stockfish_command is not None:
-        builder.append("--stockfish-command")
-        builder.append(shell_quote(validate_stockfish_command(args.stockfish_command, conf)))
+    if args.scan_command is not None:
+        builder.append("--scan-command")
+        builder.append(shell_quote(validate_scan_command(args.scan_command, conf)))
     if args.cores is not None:
         builder.append("--cores")
         builder.append(shell_quote(str(validate_cores(args.cores))))
@@ -1686,7 +1689,7 @@ def main(argv):
     g = parser.add_argument_group("advanced")
     g.add_argument("--endpoint", help="lidraughts http endpoint (default: %s)" % DEFAULT_ENDPOINT)
     g.add_argument("--engine-dir", help="engine working directory")
-    g.add_argument("--stockfish-command", help="stockfish command (default: download precompiled Stockfish)")
+    g.add_argument("--scan-command", help="scan hub-mode command")
     g.add_argument("--threads-per-process", "--threads", type=int, dest="threads", help="hint for the number of threads to use per engine process (default: %d)" % DEFAULT_THREADS)
     g.add_argument("--fixed-backoff", action="store_true", default=None, help="fixed backoff (only recommended for move servers)")
     g.add_argument("--no-fixed-backoff", dest="fixed_backoff", action="store_false", default=None)

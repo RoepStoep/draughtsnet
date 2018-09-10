@@ -1,9 +1,7 @@
 venv
-fishnet.ini
+draughtsnet.ini
 *.py[cd]
 .coverage
-stockfish-*
-Stockfish
 build/
 dist/
 fishnet.egg-info/
