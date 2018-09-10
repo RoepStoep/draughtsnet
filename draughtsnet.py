@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-# This file is part of the lichess.org fishnet client.
-# Copyright (C) 2016-2018 Niklas Fiekas <niklas.fiekas@backscattering.de>
+# This file is part of the lidraughts.org draughtsnet client, an adaptation
+# of fishnet by Niklas Fiekas <niklas.fiekas@backscattering.de>
+# Distributed under the same license:
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -17,7 +18,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-"""Distributed Stockfish analysis for lichess.org"""
+"""Distributed Scan 3.0 analysis for lidraughts.org"""
 
 from __future__ import print_function
 from __future__ import division
