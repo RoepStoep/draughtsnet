@@ -9,4 +9,5 @@ dist/
 fishnet.egg-info/
 fishnet-*.tar.gz
 .tox/
-.idea
+.idea/
+scan/

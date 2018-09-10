@@ -48,7 +48,7 @@ import string
 try:
     import requests
 except ImportError:
-    print("fishnet requires the 'requests' module.", file=sys.stderr)
+    print("draughtsnet requires the 'requests' module.", file=sys.stderr)
     print("Try 'pip install requests' or install python-requests from your distro packages.", file=sys.stderr)
     print(file=sys.stderr)
     raise
@@ -95,14 +95,13 @@ except NameError:
     DEAD_ENGINE_ERRORS = (EOFError, IOError)
 
 
-__version__ = "1.15.14"
+__version__ = "1.0.0"
 
-__author__ = "Niklas Fiekas"
-__email__ = "niklas.fiekas@backscattering.de"
+__author__ = "Stefan Schermann"
+__email__ = "stefan.schermann@gmail.com"
 __license__ = "GPLv3+"
 
-DEFAULT_ENDPOINT = "https://lichess.org/fishnet/"
-STOCKFISH_RELEASES = "https://api.github.com/repos/niklasf/Stockfish/releases/latest"
+DEFAULT_ENDPOINT = "https://lidraughts.org/draughtsnet/"
 DEFAULT_THREADS = 3
 HASH_MIN = 16
 HASH_DEFAULT = 256
@@ -111,27 +110,15 @@ MAX_BACKOFF = 30.0
 MAX_FIXED_BACKOFF = 3.0
 HTTP_TIMEOUT = 15.0
 STAT_INTERVAL = 60.0
-DEFAULT_CONFIG = "fishnet.ini"
+DEFAULT_CONFIG = "draughtsnet.ini"
 PROGRESS_REPORT_INTERVAL = 5.0
-CHECK_PYPI_CHANCE = 0.01
 LVL_SKILL = [0, 3, 6, 10, 14, 16, 18, 20]
 LVL_MOVETIMES = [50, 100, 150, 200, 300, 400, 500, 1000]
 LVL_DEPTHS = [1, 1, 2, 3, 5, 8, 13, 22]
 
 
 def intro():
-    return r"""
-.   _________         .    .
-.  (..       \_    ,  |\  /|
-.   \       O  \  /|  \ \/ /
-.    \______    \/ |   \  /      _____ _     _     _   _      _
-.       vvvv\    \ |   /  |     |  ___(_)___| |__ | \ | | ___| |_
-.       \^^^^  ==   \_/   |     | |_  | / __| '_ \|  \| |/ _ \ __|
-.        `\_   ===    \.  |     |  _| | \__ \ | | | |\  |  __/ |_
-.        / /\_   \ /      |     |_|   |_|___/_| |_|_| \_|\___|\__| %s
-.        |/   \_  \|      /
-.               \________/      Distributed Stockfish analysis for lichess.org
-""".lstrip() % __version__
+    return "Draughtsnet %s - Distributed Scan 3.0 analysis for lidraughts.org" % __version__
 
 
 PROGRESS = 15
@@ -688,7 +675,7 @@ class Worker(threading.Thread):
                     error = response.json()["error"]
                     logging.error(error)
 
-                    if "Please restart fishnet to upgrade." in error:
+                    if "Please restart draughtsnet to upgrade." in error:
                         logging.error("Stopping worker for update.")
                         raise UpdateRequired()
                 except (KeyError, ValueError):
@@ -968,164 +955,9 @@ def stockfish_filename():
         return "stockfish-%s%s" % (machine, suffix)
 
 
-def download_github_release(conf, release_page, filename):
-    path = os.path.join(get_engine_dir(conf), filename)
-    logging.info("Engine target path: %s", path)
-
-    headers = {}
-
-    # Only update to newer versions
-    try:
-        headers["If-Modified-Since"] = time.strftime('%a, %d %b %Y %H:%M:%S GMT', time.gmtime(os.path.getmtime(path)))
-    except OSError:
-        pass
-
-    # Escape GitHub API rate limiting
-    if "GITHUB_API_TOKEN" in os.environ:
-        headers["Authorization"] = "token %s" % os.environ["GITHUB_API_TOKEN"]
-
-    # Find latest release
-    logging.info("Looking up %s ...", filename)
-
-    response = requests.get(release_page, headers=headers, timeout=HTTP_TIMEOUT)
-    if response.status_code == 304:
-        logging.info("Local %s is newer than release", filename)
-        return filename
-
-    release = response.json()
-
-    logging.info("Latest release is tagged %s", release["tag_name"])
-
-    for asset in release["assets"]:
-        if asset["name"] == filename:
-            logging.info("Found %s" % asset["browser_download_url"])
-            break
-    else:
-        raise ConfigError("No precompiled %s for your platform" % filename)
-
-    # Download
-    logging.info("Downloading %s ...", filename)
-
-    download = requests.get(asset["browser_download_url"], stream=True, timeout=HTTP_TIMEOUT)
-    progress = 0
-    size = int(download.headers["content-length"])
-    with open(path, "wb") as target:
-        for chunk in download.iter_content(chunk_size=1024):
-            target.write(chunk)
-            progress += len(chunk)
-
-            if sys.stderr.isatty():
-                sys.stderr.write("\rDownloading %s: %d/%d (%d%%)" % (
-                                    filename, progress, size,
-                                    progress * 100 / size))
-                sys.stderr.flush()
-    if sys.stderr.isatty():
-        sys.stderr.write("\n")
-        sys.stderr.flush()
-
-    # Make executable
-    logging.info("chmod +x %s", filename)
-    st = os.stat(path)
-    os.chmod(path, st.st_mode | stat.S_IEXEC)
-    return filename
-
-
-def update_stockfish(conf, filename):
-    return download_github_release(conf, STOCKFISH_RELEASES, filename)
-
-
-def is_user_site_package():
-    try:
-        user_site = site.getusersitepackages()
-    except AttributeError:
-        return False
-
-    return os.path.abspath(__file__).startswith(os.path.join(user_site, ""))
-
-
-def update_self():
-    # Ensure current instance is installed as a package
-    if __package__ is None:
-        raise ConfigError("Not started as a package (python -m). Can not update using pip")
-
-    if all(dirname not in ["site-packages", "dist-packages"] for dirname in __file__.split(os.sep)):
-        raise ConfigError("Not installed as package (%s). Can not update using pip" % __file__)
-
-    logging.debug("Package: \"%s\", name: %s, loader: %s",
-                  __package__, __name__, __loader__)
-
-    # Ensure pip is available
-    try:
-        from pip._internal import main as pip_main
-    except ImportError:
-        try:
-            from pip import main as pip_main
-        except ImportError as e:
-            if "IncompleteRead" in str(e):
-                # Version incompatible with requests:
-                # https://github.com/pypa/pip/commit/796320abac38410316067bbb9455007cc51079db
-                raise ConfigError("Auto update enabled, but pip >= 6.0 required")
-            else:
-                raise ConfigError("Auto update enabled, but pip not installed")
-
-    # Ensure module file is going to be writable
-    try:
-        with open(__file__, "r+"):
-            pass
-    except IOError:
-        raise ConfigError("Auto update enabled, but no write permissions "
-                          "to module file. Use virtualenv or "
-                          "pip install --user")
-
-    # Look up the latest version
-    result = requests.get("https://pypi.org/pypi/fishnet/json", timeout=HTTP_TIMEOUT).json()
-    latest_version = result["info"]["version"]
-    url = result["releases"][latest_version][0]["url"]
-    if latest_version == __version__:
-        logging.info("Already up to date.")
-        return 0
-
-    # Wait
-    t = random.random() * 15.0
-    logging.info("Waiting %0.1fs before update ...", t)
-    time.sleep(t)
-
-    print()
-
-    # Update
-    if is_user_site_package():
-        logging.info("$ pip install --user --upgrade %s", url)
-        ret = pip_main(["install", "--user", "--upgrade", url])
-    else:
-        logging.info("$ pip install --upgrade %s", url)
-        ret = pip_main(["install", "--upgrade", url])
-    if ret != 0:
-        logging.warning("Unexpected exit code for pip install: %d", ret)
-        return ret
-
-    print()
-
-    # Wait
-    t = random.random() * 15.0
-    logging.info("Waiting %0.1fs before respawn ...", t)
-    time.sleep(t)
-
-    # Respawn
-    argv = []
-    argv.append(sys.executable)
-    argv.append("-m")
-    argv.append(os.path.splitext(os.path.basename(__file__))[0])
-    argv += sys.argv[1:]
-
-    logging.debug("Restarting with execv: %s, argv: %s",
-                  sys.executable, " ".join(argv))
-
-    os.execv(sys.executable, argv)
-
-
 def load_conf(args):
     conf = configparser.ConfigParser()
-    conf.add_section("Fishnet")
+    conf.add_section("Draughtsnet")
     conf.add_section("Stockfish")
 
     if not args.no_conf:
@@ -1139,21 +971,21 @@ def load_conf(args):
             raise ConfigError("Could not read config file: %s" % config_file)
 
     if hasattr(args, "engine_dir") and args.engine_dir is not None:
-        conf.set("Fishnet", "EngineDir", args.engine_dir)
+        conf.set("Draughtsnet", "EngineDir", args.engine_dir)
     if hasattr(args, "stockfish_command") and args.stockfish_command is not None:
-        conf.set("Fishnet", "StockfishCommand", args.stockfish_command)
+        conf.set("Draughtsnet", "StockfishCommand", args.stockfish_command)
     if hasattr(args, "key") and args.key is not None:
-        conf.set("Fishnet", "Key", args.key)
+        conf.set("Draughtsnet", "Key", args.key)
     if hasattr(args, "cores") and args.cores is not None:
-        conf.set("Fishnet", "Cores", args.cores)
+        conf.set("Draughtsnet", "Cores", args.cores)
     if hasattr(args, "memory") and args.memory is not None:
-        conf.set("Fishnet", "Memory", args.memory)
+        conf.set("Draughtsnet", "Memory", args.memory)
     if hasattr(args, "threads") and args.threads is not None:
-        conf.set("Fishnet", "Threads", str(args.threads))
+        conf.set("Draughtsnet", "Threads", str(args.threads))
     if hasattr(args, "endpoint") and args.endpoint is not None:
-        conf.set("Fishnet", "Endpoint", args.endpoint)
+        conf.set("Draughtsnet", "Endpoint", args.endpoint)
     if hasattr(args, "fixed_backoff") and args.fixed_backoff is not None:
-        conf.set("Fishnet", "FixedBackoff", str(args.fixed_backoff))
+        conf.set("Draughtsnet", "FixedBackoff", str(args.fixed_backoff))
     for option_name, option_value in args.setoption:
         conf.set("Stockfish", option_name.lower(), option_value)
 
@@ -1196,7 +1028,7 @@ def configure(args):
     print(file=out)
 
     conf = configparser.ConfigParser()
-    conf.add_section("Fishnet")
+    conf.add_section("Draughtsnet")
     conf.add_section("Stockfish")
 
     # Ensure the config file is going to be writable
@@ -1210,27 +1042,20 @@ def configure(args):
             pass
         os.remove(config_file)
 
-    # Stockfish working directory
+    # Scan working directory
     engine_dir = config_input("Engine working directory (default: %s): " % os.path.abspath("."),
                               validate_engine_dir, out)
-    conf.set("Fishnet", "EngineDir", engine_dir)
+    conf.set("Draughtsnet", "EngineDir", engine_dir)
 
-    # Stockfish command
-    print(file=out)
-    print("Fishnet uses a custom Stockfish build with variant support.", file=out)
-    print("Stockfish is licensed under the GNU General Public License v3.", file=out)
-    print("You can find the source at: https://github.com/ddugovic/Stockfish", file=out)
-    print(file=out)
-    print("You can build lichess.org custom Stockfish yourself and provide", file=out)
-    print("the path or automatically download a precompiled binary.", file=out)
+    # Scan command
     print(file=out)
     stockfish_command = config_input("Path or command (will download by default): ",
                                      lambda v: validate_stockfish_command(v, conf),
                                      out)
     if not stockfish_command:
-        conf.remove_option("Fishnet", "StockfishCommand")
+        conf.remove_option("Draughtsnet", "StockfishCommand")
     else:
-        conf.set("Fishnet", "StockfishCommand", stockfish_command)
+        conf.set("Draughtsnet", "StockfishCommand", stockfish_command)
     print(file=out)
 
     # Cores
@@ -1238,27 +1063,27 @@ def configure(args):
     default_cores = max(1, max_cores - 1)
     cores = config_input("Number of cores to use for engine threads (default %d, max %d): " % (default_cores, max_cores),
                          validate_cores, out)
-    conf.set("Fishnet", "Cores", str(cores))
+    conf.set("Draughtsnet", "Cores", str(cores))
 
     # Advanced options
     endpoint = args.endpoint or DEFAULT_ENDPOINT
     if config_input("Configure advanced options? (default: no) ", parse_bool, out):
-        endpoint = config_input("Fishnet API endpoint (default: %s): " % (endpoint, ), lambda inp: validate_endpoint(inp, endpoint), out)
+        endpoint = config_input("Draughtsnet API endpoint (default: %s): " % (endpoint, ), lambda inp: validate_endpoint(inp, endpoint), out)
 
-    conf.set("Fishnet", "Endpoint", endpoint)
+    conf.set("Draughtsnet", "Endpoint", endpoint)
 
     # Change key?
     key = None
-    if conf.has_option("Fishnet", "Key"):
-        if not config_input("Change fishnet key? (default: no) ", parse_bool, out):
-            key = conf.get("Fishnet", "Key")
+    if conf.has_option("Draughtsnet", "Key"):
+        if not config_input("Change draughtsnet key? (default: no) ", parse_bool, out):
+            key = conf.get("Draughtsnet", "Key")
 
     # Key
     if key is None:
-        status = "https://lichess.org/get-fishnet" if is_production_endpoint(conf) else "probably not required"
-        key = config_input("Personal fishnet key (append ! to force, %s): " % status,
+        status = "https://lidraughts.org/get-draughtsnet" if is_production_endpoint(conf) else "probably not required"
+        key = config_input("Personal draughtsnet key (append ! to force, %s): " % status,
                            lambda v: validate_key(v, conf, network=True), out)
-    conf.set("Fishnet", "Key", key)
+    conf.set("Draughtsnet", "Key", key)
     logging.getLogger().addFilter(CensorLogFilter(key))
 
     # Confirm
@@ -1406,7 +1231,7 @@ def validate_endpoint(endpoint, default=DEFAULT_ENDPOINT):
 def validate_key(key, conf, network=False):
     if not key or not key.strip():
         if is_production_endpoint(conf):
-            raise ConfigError("Fishnet key required")
+            raise ConfigError("Draughtsnet key required")
         else:
             return ""
 
@@ -1416,19 +1241,19 @@ def validate_key(key, conf, network=False):
     key = key.rstrip("!").strip()
 
     if not re.match(r"^[a-zA-Z0-9]+$", key):
-        raise ConfigError("Fishnet key is expected to be alphanumeric")
+        raise ConfigError("Draughtsnet key is expected to be alphanumeric")
 
     if network:
         response = requests.get(get_endpoint(conf, "key/%s" % key), timeout=HTTP_TIMEOUT)
         if response.status_code == 404:
-            raise ConfigError("Invalid or inactive fishnet key")
+            raise ConfigError("Invalid or inactive draughtsnet key")
         else:
             response.raise_for_status()
 
     return key
 
 
-def conf_get(conf, key, default=None, section="Fishnet"):
+def conf_get(conf, key, default=None, section="Draughtsnet"):
     if not conf.has_section(section):
         return default
     elif not conf.has_option(section, key):
@@ -1445,8 +1270,6 @@ def get_stockfish_command(conf, update=True):
     stockfish_command = validate_stockfish_command(conf_get(conf, "StockfishCommand"), conf)
     if not stockfish_command:
         filename = stockfish_filename()
-        if update:
-            filename = update_stockfish(conf, filename)
         return validate_stockfish_command(os.path.join(".", filename), conf)
     else:
         return stockfish_command
@@ -1477,31 +1300,8 @@ def start_backoff(conf):
             backoff = min(backoff + 1, MAX_BACKOFF)
 
 
-def update_available():
-    try:
-        result = requests.get("https://pypi.org/pypi/fishnet/json", timeout=HTTP_TIMEOUT).json()
-        latest_version = result["info"]["version"]
-    except Exception:
-        logging.exception("Failed to check for update on PyPI")
-        return False
-
-    if latest_version == __version__:
-        logging.info("[fishnet v%s] Client is up to date", __version__)
-        return False
-    else:
-        logging.info("[fishnet v%s] Update available on PyPI: %s",
-                     __version__, latest_version)
-        return True
-
-
 def cmd_run(args):
     conf = load_conf(args)
-
-    if args.auto_update:
-        print()
-        print("### Updating ...")
-        print()
-        update_self()
 
     stockfish_command = validate_stockfish_command(conf_get(conf, "StockfishCommand"), conf)
     if not stockfish_command:
@@ -1578,14 +1378,11 @@ def cmd_run(args):
                             raise worker.fatal_error
 
                 # Log stats
-                logging.info("[fishnet v%s] Analyzed %d positions, crunched %d million nodes",
+                logging.info("[draughtsnet v%s] Analyzed %d positions, crunched %d million nodes",
                              __version__,
                              sum(worker.positions for worker in workers),
                              int(sum(worker.nodes for worker in workers) / 1000 / 1000))
 
-                # Check for update
-                if random.random() <= CHECK_PYPI_CHANCE and update_available() and args.auto_update:
-                    raise UpdateRequired()
         except ShutdownSoon:
             handler = SignalHandler()
 
@@ -1635,7 +1432,7 @@ def cmd_systemd(args):
 
     template = textwrap.dedent("""\
         [Unit]
-        Description=Fishnet instance
+        Description=Draughtsnet instance
         After=network-online.target
         Wants=network-online.target
 
@@ -1699,16 +1496,12 @@ def cmd_systemd(args):
         builder.append("--setoption")
         builder.append(shell_quote(option_name))
         builder.append(shell_quote(option_value))
-    if args.auto_update:
-        builder.append("--auto-update")
 
     builder.append("run")
 
     start = " ".join(builder)
 
     protect_system = "full"
-    if args.auto_update and os.path.realpath(os.path.abspath(__file__)).startswith("/usr/"):
-        protect_system = "false"
 
     print(template.format(
         user=getpass.getuser(),
@@ -1727,11 +1520,11 @@ def cmd_systemd(args):
 
     if sys.stdout.isatty():
         print("\n# Example usage:", file=sys.stderr)
-        print("# python -m fishnet systemd | sudo tee /etc/systemd/system/fishnet.service", file=sys.stderr)
-        print("# sudo systemctl enable fishnet.service", file=sys.stderr)
-        print("# sudo systemctl start fishnet.service", file=sys.stderr)
+        print("# python -m draughtsnet systemd | sudo tee /etc/systemd/system/draughtsnet.service", file=sys.stderr)
+        print("# sudo systemctl enable draughtsnet.service", file=sys.stderr)
+        print("# sudo systemctl start draughtsnet.service", file=sys.stderr)
         print("#", file=sys.stderr)
-        print("# Live view of the log: sudo journalctl --follow -u fishnet", file=sys.stderr)
+        print("# Live view of the log: sudo journalctl --follow -u draughtsnet", file=sys.stderr)
 
 
 @contextlib.contextmanager
@@ -1879,20 +1672,19 @@ def main(argv):
     # Parse command line arguments
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verbose", "-v", default=0, action="count", help="increase verbosity")
-    parser.add_argument("--version", action="version", version="fishnet v{0}".format(__version__))
+    parser.add_argument("--version", action="version", version="draughtsnet v{0}".format(__version__))
 
     g = parser.add_argument_group("configuration")
-    g.add_argument("--auto-update", action="store_true", help="automatically install available updates")
     g.add_argument("--conf", help="configuration file")
     g.add_argument("--no-conf", action="store_true", help="do not use a configuration file")
-    g.add_argument("--key", "--apikey", "-k", help="fishnet api key")
+    g.add_argument("--key", "--apikey", "-k", help="draughtsnet api key")
 
     g = parser.add_argument_group("resources")
     g.add_argument("--cores", help="number of cores to use for engine processes (or auto for n - 1, or all for n)")
     g.add_argument("--memory", help="total memory (MB) to use for engine hashtables")
 
     g = parser.add_argument_group("advanced")
-    g.add_argument("--endpoint", help="lichess http endpoint (default: %s)" % DEFAULT_ENDPOINT)
+    g.add_argument("--endpoint", help="lidraughts http endpoint (default: %s)" % DEFAULT_ENDPOINT)
     g.add_argument("--engine-dir", help="engine working directory")
     g.add_argument("--stockfish-command", help="stockfish command (default: download precompiled Stockfish)")
     g.add_argument("--threads-per-process", "--threads", type=int, dest="threads", help="hint for the number of threads to use per engine process (default: %d)" % DEFAULT_THREADS)
@@ -1924,10 +1716,6 @@ def main(argv):
     try:
         sys.exit(commands[args.command](args))
     except UpdateRequired:
-        if args.auto_update:
-            logging.info("\n\n### Updating ...\n")
-            update_self()
-
         logging.error("Update required. Exiting (status 70)")
         return 70
     except ConfigError:
