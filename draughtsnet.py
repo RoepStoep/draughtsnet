@@ -28,6 +28,7 @@ import logging
 import json
 import time
 import random
+import math
 import collections
 import contextlib
 import multiprocessing
@@ -102,19 +103,18 @@ __email__ = "stefan.schermann@gmail.com"
 __license__ = "GPLv3+"
 
 DEFAULT_ENDPOINT = "https://lidraughts.org/draughtsnet/"
-DEFAULT_THREADS = 3
+DEFAULT_THREADS = 1
 HASH_MIN = 16
 HASH_DEFAULT = 256
 HASH_MAX = 512
 MAX_BACKOFF = 30.0
-MAX_FIXED_BACKOFF = 3.0
+MAX_FIXED_BACKOFF = 1.0
 HTTP_TIMEOUT = 15.0
 STAT_INTERVAL = 60.0
 DEFAULT_CONFIG = "draughtsnet.ini"
 PROGRESS_REPORT_INTERVAL = 5.0
-LVL_SKILL = [0, 3, 6, 10, 14, 16, 18, 20]
 LVL_MOVETIMES = [50, 100, 150, 200, 300, 400, 500, 1000]
-LVL_DEPTHS = [1, 1, 2, 3, 5, 8, 13, 22]
+LVL_DEPTHS = [1, 2, 3, 4, 5, 8, 13, 18]
 
 
 def intro():
@@ -409,16 +409,14 @@ def init(p):
             logging.warning("Unexpected engine response to init: %s %s", command, arg)
 
 
-def isready(p):
-    send(p, "isready")
+def ping(p):
+    send(p, "ping")
     while True:
         command, arg = recv_uci(p)
-        if command == "readyok":
+        if command == "pong":
             break
-        elif command == "info" and arg.startswith("string "):
-            pass
         else:
-            logging.warning("Unexpected engine response to isready: %s %s", command, arg)
+            logging.warning("Unexpected engine response to ping: %s %s", command, arg)
 
 
 def setoption(p, name, value):
@@ -429,113 +427,115 @@ def setoption(p, name, value):
     elif value is None:
         value = "none"
 
-    send(p, "setoption name %s value %s" % (name, value))
+    send(p, "set-param name=%s value=%s" % (name, value))
 
 
 def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None):
-    send(p, "position fen %s moves %s" % (position, " ".join(moves)))
+    if moves and len(moves) != 0 and moves[0] != "":
+        send(p, "pos pos=%s moves=%s" % (position, " ".join(moves)))
+    else:
+        send(p, "pos pos=%s" % position)
+
+    if movetime is not None and clock is not None:
+        if position[0] == 'B':
+            timeleft = clock["btime"] / 100.0
+        else :
+            timeleft = clock["wtime"] / 100.0
+        increment = clock["inc"]
+        if increment == 0 and timeleft < 40.0:
+            movetime *= (timeleft / 40.0)
+        elif increment == 1 and timeleft < 6.0:
+            movetime *= (timeleft / 6.0)
 
     builder = []
-    builder.append("go")
-    if movetime is not None:
-        builder.append("movetime")
-        builder.append(str(movetime))
+    builder.append("level")
     if depth is not None:
-        builder.append("depth")
-        builder.append(str(depth))
-    if nodes is not None:
-        builder.append("nodes")
-        builder.append(str(nodes))
-    if clock is not None:
-        builder.append("wtime")
-        builder.append(str(clock["wtime"] * 10))
-        builder.append("btime")
-        builder.append(str(clock["btime"] * 10))
-        builder.append("winc")
-        builder.append(str(clock["inc"] * 1000))
-        builder.append("binc")
-        builder.append(str(clock["inc"] * 1000))
+        builder.append("depth=%s" % str(depth))
+    elif nodes is not None:
+        if movetime is None:
+            builder.append("move-time=2")
+        else:
+            builder.append("move-time=%s" % str(movetime))
+    elif movetime is not None:
+        builder.append("move-time=%s" % str(movetime))
 
     send(p, " ".join(builder))
+
+    if nodes is not None:
+        send(p, "go analyze")
+    else:
+        send(p, "go think")
 
     info = {}
     info["bestmove"] = None
 
+    start = time.time()
     while True:
         command, arg = recv_uci(p)
 
-        if command == "bestmove":
-            bestmove = arg.split()[0]
-            if bestmove and bestmove != "(none)":
-                info["bestmove"] = bestmove
+        forcestop = False
+        if command == "done":
+            bestmoveval = arg.split()[0]
+            if bestmoveval and bestmoveval.find("=") != -1:
+                bestmove = bestmoveval.split("=")[1]
+                if bestmove.find("x") != -1:
+                    fields = bestmove.split("x")
+                    origdest = fields[:2]
+                    taken = fields[2:]
+                else:
+                    origdest = bestmove.split("-")[:2]
+                    taken = []
+                if len(origdest) == 2:
+                    info["bestmove"] = "%02d%02d" % (int(origdest[0]), int(origdest[1]))
+                alltaken = ""
+                for t in taken:
+                    alltaken += "%02d" % int(t)
+                info["taken"] = alltaken
             return info
         elif command == "info":
             arg = arg or ""
 
             # Parse all other parameters
-            score_kind, score_value, score_bound = None, None, False
-            current_parameter = None
-            for token in arg.split(" "):
-                if current_parameter == "string":
-                    # Everything until the end of line is a string
-                    if "string" in info:
-                        info["string"] += " " + token
+            cur_nodes = 0
+            parts = arg.split()
+            i = 0
+            while i < len(parts):
+                name_and_value = parts[i].split("=", 1)
+                if len(name_and_value) == 2:
+                    value = name_and_value[1]
+                    if value.startswith("\""):
+                        value = value[1:]
+                        i += 1
+                        while i < len(parts) and not parts[i].endswith("\""):
+                            value += " " + parts[i]
+                            i += 1
+                        value += " " + parts[i][:-1]
+                    if name_and_value[0] in ["nodes", "depth"]:
+                        info[name_and_value[0]] = int(value)
                     else:
-                        info["string"] = token
-                elif token == "score":
-                    current_parameter = "score"
-                elif token == "pv":
-                    current_parameter = "pv"
-                    if info.get("multipv", 1) == 1:
-                        info.pop("pv", None)
-                elif token in ["depth", "seldepth", "time", "nodes", "multipv",
-                               "currmove", "currmovenumber",
-                               "hashfull", "nps", "tbhits", "cpuload",
-                               "refutation", "currline", "string"]:
-                    current_parameter = token
-                    info.pop(current_parameter, None)
-                elif current_parameter in ["depth", "seldepth", "time",
-                                           "nodes", "currmovenumber",
-                                           "hashfull", "nps", "tbhits",
-                                           "cpuload", "multipv"]:
-                    # Integer parameters
-                    info[current_parameter] = int(token)
-                elif current_parameter == "score":
-                    # Score
-                    if token in ["cp", "mate"]:
-                        score_kind = token
-                        score_value = None
-                    elif token in ["lowerbound", "upperbound"]:
-                        score_bound = True
-                    else:
-                        score_value = int(token)
-                elif current_parameter != "pv" or info.get("multipv", 1) == 1:
-                    # Strings
-                    if current_parameter in info:
-                        info[current_parameter] += " " + token
-                    else:
-                        info[current_parameter] = token
+                        info[name_and_value[0]] = value
+                    if name_and_value[0] == "nodes":
+                        cur_nodes = int(value)
+                i += 1
 
-            # Set score if not just a bound
-            if score_kind and score_value is not None and not score_bound:
-                info["score"] = {score_kind: score_value}
+            # Check if we have reached the node count
+            if nodes is not None and cur_nodes >= nodes:
+                forcestop = True
         else:
             logging.warning("Unexpected engine response to go: %s %s", command, arg)
+
+        # Force play if movetime is exceeded (not exact as we only reach this point after the engine produces output)
+        if forcestop or (movetime is not None and time.time() - start > movetime):
+            send(p, "stop")
 
 
 def set_variant_options(p, variant):
     variant = variant.lower()
 
-    setoption(p, "UCI_Chess960", variant in ["fromposition", "chess960"])
-
-    if variant in ["standard", "fromposition", "chess960"]:
-        setoption(p, "UCI_Variant", "chess")
-    elif variant == "antichess":
-        setoption(p, "UCI_Variant", "giveaway")
-    elif variant == "threecheck":
-        setoption(p, "UCI_Variant", "3check")
+    if variant in ["standard", "fromposition"]:
+        setoption(p, "variant", "normal")
     else:
-        setoption(p, "UCI_Variant", variant)
+        setoption(p, "variant", variant)
 
 
 class ProgressReporter(threading.Thread):
@@ -754,6 +754,8 @@ class Worker(threading.Thread):
 
         # Prepare UCI options
         self.scan_info["options"] = {}
+        self.scan_info["options"]["threads"] = str(self.threads)
+        self.scan_info["options"]["tt-size"] = str(math.floor(math.log(self.memory * 1024 * 1024 / 16, 2)))
 
         # Custom options
         if self.conf.has_section("Scan"):
@@ -811,13 +813,9 @@ class Worker(threading.Thread):
         logging.debug("Playing %s (%s) with lvl %d",
                       self.job_name(job), variant, lvl)
 
-        set_variant_options(self.scan, job.get("variant", "standard"))
-        setoption(self.scan, "Skill Level", LVL_SKILL[lvl - 1])
-        setoption(self.scan, "UCI_AnalyseMode", False)
-        send(self.scan, "ucinewgame")
-        isready(self.scan)
+        send(self.scan, "new-game")
 
-        movetime = int(round(LVL_MOVETIMES[lvl - 1] / (self.threads * 0.9 ** (self.threads - 1))))
+        movetime = round(LVL_MOVETIMES[lvl - 1] / (1000 * self.threads * 0.9 ** (self.threads - 1)), 2)
 
         start = time.time()
         part = go(self.scan, job["position"], moves,
@@ -835,6 +833,7 @@ class Worker(threading.Thread):
         result = self.make_request()
         result["move"] = {
             "bestmove": part["bestmove"],
+            "taken": part["taken"]
         }
         return result
 
@@ -850,7 +849,6 @@ class Worker(threading.Thread):
         setoption(self.scan, "Skill Level", 20)
         setoption(self.scan, "UCI_AnalyseMode", True)
         send(self.scan, "ucinewgame")
-        isready(self.scan)
 
         nodes = job.get("nodes") or 3500000
         skip = job.get("skipPositions", [])
