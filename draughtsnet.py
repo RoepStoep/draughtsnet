@@ -432,7 +432,7 @@ def setoption(p, name, value):
 
 def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None):
     if moves and len(moves) != 0 and moves[0] != "":
-        send(p, "pos pos=%s moves=%s" % (position, " ".join(moves)))
+        send(p, "pos pos=%s moves=\"%s\"" % (position, moves))
     else:
         send(p, "pos pos=%s" % position)
 
@@ -475,6 +475,10 @@ def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None):
 
         forcestop = False
         if command == "done":
+            if len(arg) == 0:
+                info["bestmove"] = "gameover"
+                info["taken"] = ""
+                return info
             bestmoveval = arg.split()[0]
             if bestmoveval and bestmoveval.find("=") != -1:
                 bestmove = bestmoveval.split("=")[1]
@@ -582,13 +586,15 @@ class ProgressReporter(threading.Thread):
 
 
 class Worker(threading.Thread):
-    def __init__(self, conf, threads, memory, progress_reporter):
+    def __init__(self, conf, threads, memory, progress_reporter, selfplay_lvl, selfplay_rounds):
         super(Worker, self).__init__()
         self.conf = conf
         self.threads = threads
         self.memory = memory
 
         self.progress_reporter = progress_reporter
+        self.selfplay = selfplay_lvl
+        self.selfplay_rounds = selfplay_rounds
 
         self.alive = True
         self.fatal_error = None
@@ -632,7 +638,185 @@ class Worker(threading.Thread):
     def run(self):
         try:
             while self.is_alive():
-                self.run_inner()
+                if 0 < self.selfplay <= 8:
+                    self.run_selfplay()
+                    return
+                else:
+                    self.run_inner()
+        except UpdateRequired as error:
+            self.fatal_error = error
+        except Exception as error:
+            self.fatal_error = error
+            logging.exception("Fatal error in worker")
+        finally:
+            self.finished.set()
+
+    def run_selfplay(self):
+        try:
+
+            # Check if the engine is still alive and start, if necessary
+            self.start_scan()
+
+            logging.info(" ### Playing %d games against self, level %d",
+                         self.selfplay_rounds, self.selfplay)
+
+            # Play 200 games against a stronger version of self from starting position
+            wins = 0
+            losses = 0
+            draws = 0
+            for i in range(self.selfplay_rounds):
+                game_start = time.time()
+                threefold = {}
+                drawrule = 0
+                move_nr = 1
+                moves = ""
+                pos = "Wbbbbbbbbbbbbbbbbbbbbeeeeeeeeeewwwwwwwwwwwwwwwwwwww"
+                newpos = list(pos)
+                white_playing = True
+                self_playing = random.choice([True, False])
+                while self.is_alive():
+
+                    send(self.scan, "new-game")
+
+                    if self_playing:
+                        movetime = round(LVL_MOVETIMES[self.selfplay - 1] / (1000 * self.threads * 0.9 ** (self.threads - 1)), 2)
+                        depth = LVL_DEPTHS[self.selfplay - 1]
+                    else:
+                        movetime = round(1.5 * LVL_MOVETIMES[7] / (1000 * self.threads * 0.9 ** (self.threads - 1)), 2)
+                        depth = LVL_DEPTHS[7] + 2
+
+                    start = time.time()
+                    part = go(self.scan, pos, moves,
+                              movetime=movetime, clock=None,
+                              depth=depth)
+                    end = time.time()
+
+                    bestmove = part["bestmove"]
+                    taken = part["taken"]
+
+                    if len(moves) == 0:
+                        newpos = list(pos)
+                    whiteK = 0
+                    whiteM = 0
+                    blackK = 0
+                    blackM = 0
+                    for piece in newpos[1:]:
+                        if piece == "w":
+                            whiteM += 1
+                        elif piece == "W":
+                            whiteK += 1
+                        elif piece == "b":
+                            blackM += 1
+                        elif piece == "B":
+                            blackK += 1
+                    white = whiteK + whiteM
+                    black = blackK + blackM
+
+                    if bestmove == "gameover":
+                        if self_playing:
+                            losses += 1
+                            logging.log(PROGRESS, "Game %d: %d moves - loss in %0.3fs" % (i + 1, move_nr, time.time() - game_start))
+                        else:
+                            wins += 1
+                            logging.log(PROGRESS, "Game %d: %d moves - win in %0.3fs" % (i + 1, move_nr, time.time() - game_start))
+                        break
+
+                    # Detect material drawing rules
+                    if white + black > 2 and len(taken) != 0:
+                        drawrule = 0
+                    if white + black == 4 and (white == 1 or black == 1) and whiteK != 0 and blackK != 0:
+                        drawrule += 1
+                        if drawrule > 32:
+                            draws += 1
+                            logging.log(PROGRESS, "Game %d: %d moves - draw by 16 move rule in %0.3fs" % (i + 1, move_nr, time.time() - game_start))
+                            break
+                    elif white + black <= 3 and whiteK != 0 and blackK != 0:
+                        drawrule += 1
+                        if drawrule > 10:
+                            draws += 1
+                            logging.log(PROGRESS, "Game %d: %d moves - draw by 5 move rule in %0.3fs" % (i + 1, move_nr, time.time() - game_start))
+                            break
+
+                    origdest = list(map(''.join, zip(*[iter(bestmove)] * 2)))
+                    orig = int(origdest[0])
+                    dest = int(origdest[1])
+
+                    newpos[dest] = newpos[orig]
+                    newpos[orig] = "e"
+                    if white_playing and int(dest) <= 5:
+                        newpos[dest] = "W"
+                    elif not white_playing and int(dest) >= 46:
+                        newpos[dest] = "B"
+                    takestring = ""
+                    for takes in list(map(''.join, zip(*[iter(taken)] * 2))):
+                        takepos = int(takes)
+                        newpos[takepos] = "e"
+                        takestring += "x%s" % str(takepos)
+
+                    if newpos[dest] == "W" or newpos[dest] == "B":
+                        if taken != "":
+                            threefold = {}
+                        else:
+                            if white_playing:
+                                testpos = "B" + "".join(newpos[1:])
+                            else:
+                                testpos = "W" + "".join(newpos[1:])
+                            threefold[testpos] = threefold.get(testpos, 0) + 1
+                            if threefold[testpos] == 3:
+                                draws += 1
+                                logging.log(PROGRESS,
+                                            "Game %d: %d moves - drawn by threefold repetition in %0.3fs" % (i + 1, move_nr, time.time() - game_start))
+                                break
+
+                        # Move history is required for repetition, repetition is only possible after a king move
+                        if len(moves) != 0:
+                            moves += " "
+                        if taken != "":
+                            moves += "%sx%s%s" % (str(orig), str(dest), takestring)
+                            drawrule = 0
+                        else:
+                            moves += "%s-%s" % (str(orig), str(dest))
+                            drawrule += 1
+                            if drawrule > 50:
+                                draws += 1  # 25 kingmoves each without capture
+                                logging.log(PROGRESS, "Game %d: %d moves - draw by 25 move rule in %0.3fs" % (i + 1, move_nr, time.time() - game_start))
+                                break
+                    else:
+                        threefold = {}
+                        if white + black > 4:
+                            drawrule = 0
+                        if white_playing:
+                            pos = "B" + "".join(newpos[1:])
+                        else:
+                            pos = "W" + "".join(newpos[1:])
+                        moves = ""
+
+                    if taken != "":
+                        logmove = "%sx%s" % (str(orig), str(dest))
+                    else:
+                        logmove = "%s-%s" % (str(orig), str(dest))
+                    if white_playing:
+                        logmove = "%s. %s" % (str(move_nr), logmove)
+                    else:
+                        logmove = "%s... %s" % (str(move_nr), logmove)
+                    logging.debug("%0.3fs, depth %d: %s", end - start, part.get("depth", 0), logmove)
+
+                    white_playing = not white_playing
+                    self_playing = not self_playing
+
+                    if white_playing:
+                        move_nr += 1
+
+                    self.nodes += part.get("nodes", 0)
+                    self.positions += 1
+
+            logging.info(" ### Finished level %d: +%d -%d =%d",
+                        self.selfplay, wins, losses, draws)
+
+            # done
+            self.kill_scan()
+            return
+
         except UpdateRequired as error:
             self.fatal_error = error
         except Exception as error:
@@ -1356,7 +1540,7 @@ def cmd_run(args):
     progress_reporter.setDaemon(True)
     progress_reporter.start()
 
-    workers = [Worker(conf, bucket, memory // instances, progress_reporter) for bucket in buckets]
+    workers = [Worker(conf, bucket, memory // instances, progress_reporter, 0, 0) for bucket in buckets]
 
     # Start all threads
     for i, worker in enumerate(workers):
@@ -1377,6 +1561,135 @@ def cmd_run(args):
                         worker.finished.wait(1.0)
                         if worker.fatal_error:
                             raise worker.fatal_error
+
+                # Log stats
+                logging.info("[draughtsnet v%s] Analyzed %d positions, crunched %d million nodes",
+                             __version__,
+                             sum(worker.positions for worker in workers),
+                             int(sum(worker.nodes for worker in workers) / 1000 / 1000))
+
+        except ShutdownSoon:
+            handler = SignalHandler()
+
+            if any(worker.job for worker in workers):
+                logging.info("\n\n### Stopping soon. Press ^C again to abort pending jobs ...\n")
+
+            for worker in workers:
+                worker.stop_soon()
+
+            for worker in workers:
+                while not worker.finished.wait(0.5):
+                    pass
+    except (Shutdown, ShutdownSoon):
+        if any(worker.job for worker in workers):
+            logging.info("\n\n### Good bye! Aborting pending jobs ...\n")
+        else:
+            logging.info("\n\n### Good bye!")
+    except UpdateRequired:
+        if any(worker.job for worker in workers):
+            logging.info("\n\n### Update required! Aborting pending jobs ...\n")
+        else:
+            logging.info("\n\n### Update required!")
+        raise
+    finally:
+        handler.ignore = True
+
+        # Stop workers
+        for worker in workers:
+            worker.stop()
+
+        progress_reporter.stop()
+
+        # Wait
+        for worker in workers:
+            worker.finished.wait()
+
+    return 0
+
+
+def cmd_selfplay(args):
+    conf = load_conf(args)
+
+    scan_command = validate_scan_command(conf_get(conf, "ScanCommand"), conf)
+    if not scan_command:
+        raise ConfigError("Ensure you are using Scan 3.0. "
+                          "Invalid command: %s" % scan_command)
+
+    print()
+    print("### Checking configuration ...")
+    print()
+    print("Python:           %s (with requests %s)" % (platform.python_version(), requests.__version__))
+    print("EngineDir:        %s" % get_engine_dir(conf))
+    print("ScanCommand:      %s" % scan_command)
+    print("Key:              %s" % (("*" * len(get_key(conf))) or "(none)"))
+
+    cores = validate_cores(conf_get(conf, "Cores"))
+    print("Cores:            %d" % cores)
+
+    threads = validate_threads(conf_get(conf, "Threads"), conf)
+    instances = 1
+    print("Engine processes: %d (each ~%d threads)" % (instances, threads))
+    memory = validate_memory(conf_get(conf, "Memory"), conf)
+    print("Memory:           %d MB" % memory)
+    endpoint = get_endpoint(conf)
+    warning = "" if endpoint.startswith("https://") else " (WARNING: not using https)"
+    print("Endpoint:         %s%s" % (endpoint, warning))
+    print("FixedBackoff:     %s" % parse_bool(conf_get(conf, "FixedBackoff")))
+    print()
+
+    if conf.has_section("Scan") and conf.items("Scan"):
+        print("Using custom engine options is discouraged:")
+        for name, value in conf.items("Scan"):
+            if name.lower() == "hash":
+                hint = " (use --memory instead)"
+            elif name.lower() == "threads":
+                hint = " (use --threads-per-process instead)"
+            else:
+                hint = ""
+            print(" * %s = %s%s" % (name, value, hint))
+        print()
+
+    print("### Starting workers ...")
+    print()
+
+    buckets = [0] * instances
+    for i in range(0, cores):
+        buckets[i % instances] += 1
+
+    progress_reporter = ProgressReporter(len(buckets) + 4, conf)
+    progress_reporter.setDaemon(True)
+    progress_reporter.start()
+
+    if hasattr(args, "selfplay_level") and args.selfplay_level is not None:
+        level = args.selfplay_level
+    else:
+        level = 1
+
+    if hasattr(args, "selfplay_games") and args.selfplay_games is not None:
+        games = args.selfplay_games
+    else:
+        games = 200
+
+    workers = [Worker(conf, bucket, memory // instances, progress_reporter, level, games) for bucket in buckets]
+
+    # Start all threads
+    for i, worker in enumerate(workers):
+        worker.set_name("><> %d" % (i + 1))
+        worker.setDaemon(True)
+        worker.start()
+
+    # Wait while the workers are running
+    try:
+        # Let SIGTERM and SIGINT gracefully terminate the program
+        handler = SignalHandler()
+
+        try:
+            while True:
+                # Check worker status
+                for _ in range(int(max(1, STAT_INTERVAL / len(workers)))):
+                    for worker in workers:
+                        if worker.finished.wait(1.0):
+                            raise Shutdown
 
                 # Log stats
                 logging.info("[draughtsnet v%s] Analyzed %d positions, crunched %d million nodes",
@@ -1693,11 +2006,15 @@ def main(argv):
     g.add_argument("--no-fixed-backoff", dest="fixed_backoff", action="store_false", default=None)
     g.add_argument("--setoption", "-o", nargs=2, action="append", default=[], metavar=("NAME", "VALUE"), help="set a custom uci option")
 
+    g.add_argument("--selfplay-games", type=int, help="amount of games to play against self (default: 200)")
+    g.add_argument("--selfplay-level", type=int, help="selfplay engine level 1-8 (default: 1)")
+
     commands = collections.OrderedDict([
         ("run", cmd_run),
         ("configure", cmd_configure),
         ("systemd", cmd_systemd),
         ("cpuid", cmd_cpuid),
+        ("selfplay", cmd_selfplay),
     ])
 
     parser.add_argument("command", default="run", nargs="?", choices=commands.keys())
