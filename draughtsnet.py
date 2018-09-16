@@ -114,7 +114,8 @@ STAT_INTERVAL = 60.0
 DEFAULT_CONFIG = "draughtsnet.ini"
 PROGRESS_REPORT_INTERVAL = 5.0
 LVL_MOVETIMES = [50, 100, 150, 200, 300, 400, 500, 1000]
-LVL_DEPTHS = [1, 2, 3, 4, 5, 8, 13, 18]
+LVL_DEPTHS = [2, 3, 4, 5, 6, 8, 11, 18]
+LVL_HANDICAPS = [3, 3, 3, 2, 2, 1, 0, 0]
 
 
 def intro():
@@ -430,11 +431,14 @@ def setoption(p, name, value):
     send(p, "set-param name=%s value=%s" % (name, value))
 
 
-def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None):
+def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None, handicap=None):
     if moves and len(moves) != 0 and moves[0] != "":
         send(p, "pos pos=%s moves=\"%s\"" % (position, moves))
     else:
         send(p, "pos pos=%s" % position)
+
+    if handicap is not None and handicap > 0:
+        send(p, "level handicap=%s" % handicap)
 
     if movetime is not None and clock is not None:
         if position[0] == 'B':
@@ -442,24 +446,18 @@ def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None):
         else :
             timeleft = clock["wtime"] / 100.0
         increment = clock["inc"]
-        if increment == 0 and timeleft < 40.0:
-            movetime *= (timeleft / 40.0)
+        if increment == 0 and timeleft < 50.0:
+            movetime *= (timeleft / 50.0)
         elif increment == 1 and timeleft < 6.0:
             movetime *= (timeleft / 6.0)
 
-    builder = []
-    builder.append("level")
-    if depth is not None:
-        builder.append("depth=%s" % str(depth))
-    elif nodes is not None:
-        if movetime is None:
-            builder.append("move-time=2")
-        else:
-            builder.append("move-time=%s" % str(movetime))
-    elif movetime is not None:
-        builder.append("move-time=%s" % str(movetime))
+    if nodes is not None and movetime is None:
+        movetime = 2 # If no movetime is specified, allow 2 seconds to reach the required amount of nodes
 
-    send(p, " ".join(builder))
+    if depth is not None:
+        send(p, "level depth=%s" % str(depth))
+    if movetime is not None:
+        send(p, "level move-time=%s" % str(movetime))
 
     if nodes is not None:
         send(p, "go analyze")
@@ -679,16 +677,16 @@ class Worker(threading.Thread):
                     send(self.scan, "new-game")
 
                     if self_playing:
-                        movetime = round(LVL_MOVETIMES[self.selfplay - 1] / (1000 * self.threads * 0.9 ** (self.threads - 1)), 2)
-                        depth = LVL_DEPTHS[self.selfplay - 1]
+                        move_level = self.selfplay - 1
                     else:
-                        movetime = round(1.5 * LVL_MOVETIMES[7] / (1000 * self.threads * 0.9 ** (self.threads - 1)), 2)
-                        depth = LVL_DEPTHS[7] + 2
+                        move_level = 7
+
+                    movetime = round(LVL_MOVETIMES[move_level] / (1000 * self.threads * 0.9 ** (self.threads - 1)), 2)
 
                     start = time.time()
                     part = go(self.scan, pos, moves,
                               movetime=movetime, clock=None,
-                              depth=depth)
+                              depth=LVL_DEPTHS[move_level], handicap=LVL_HANDICAPS[move_level])
                     end = time.time()
 
                     bestmove = part["bestmove"]
@@ -1004,7 +1002,7 @@ class Worker(threading.Thread):
         start = time.time()
         part = go(self.scan, job["position"], moves,
                   movetime=movetime, clock=job["work"].get("clock"),
-                  depth=LVL_DEPTHS[lvl - 1])
+                  depth=LVL_DEPTHS[lvl - 1], handicap = LVL_HANDICAPS[lvl - 1])
         end = time.time()
 
         logging.log(PROGRESS, "Played move in %s (%s) with lvl %d: %0.3fs elapsed, depth %d",
