@@ -432,7 +432,7 @@ def setoption(p, name, value):
 
 
 def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None, handicap=None):
-    if moves and len(moves) != 0 and moves[0] != "":
+    if moves and len(moves) != 0:
         send(p, "pos pos=%s moves=\"%s\"" % (position, moves))
     else:
         send(p, "pos pos=%s" % position)
@@ -990,7 +990,7 @@ class Worker(threading.Thread):
     def bestmove(self, job):
         lvl = job["work"]["level"]
         variant = job.get("variant", "standard")
-        moves = job["moves"].split(" ")
+        moves = job["moves"]
 
         logging.debug("Playing %s (%s) with lvl %d",
                       self.job_name(job), variant, lvl)
@@ -1050,7 +1050,7 @@ class Worker(threading.Thread):
             logging.log(PROGRESS, "Analysing %s: %s",
                         variant, self.job_name(job, ply))
 
-            part = go(self.scan, job["position"], moves[0:ply],
+            part = go(self.scan, job["position"], " ".join(moves[0:ply]),
                       nodes=nodes, movetime=4000)
 
             if "mate" not in part["score"] and "time" in part and part["time"] < 100:
