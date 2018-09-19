@@ -452,7 +452,7 @@ def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None, ha
             movetime *= (timeleft / 6.0)
 
     if nodes is not None and movetime is None:
-        movetime = 2 # If no movetime is specified, allow 2 seconds to reach the required amount of nodes
+        movetime = 4 # If no movetime is specified, allow 4 seconds to reach the required amount of nodes
 
     if depth is not None:
         send(p, "level depth=%s" % str(depth))
@@ -474,8 +474,9 @@ def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None, ha
         forcestop = False
         if command == "done":
             if len(arg) == 0:
-                info["bestmove"] = "gameover"
+                info["bestmove"] = ""
                 info["taken"] = ""
+                info["score"] = { "win": 0 }
                 return info
             bestmoveval = arg.split()[0]
             if bestmoveval and bestmoveval.find("=") != -1:
@@ -514,7 +515,13 @@ def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None, ha
                         value += " " + parts[i][:-1]
                     if name_and_value[0] in ["nodes", "depth"]:
                         info[name_and_value[0]] = int(value)
-                    else:
+                    elif name_and_value[0] in ["score"]:
+                        info[name_and_value[0]] = { "cp": int(float(value)* 100) }
+                    elif name_and_value[0] == "time":
+                        info[name_and_value[0]] = int(float(value) * 1000)
+                    elif name_and_value[0] == "nps":
+                        info[name_and_value[0]] = round(float(value))
+                    elif name_and_value[0] != "mean-depth":
                         info[name_and_value[0]] = value
                     if name_and_value[0] == "nodes":
                         cur_nodes = int(value)
@@ -710,7 +717,7 @@ class Worker(threading.Thread):
                     white = whiteK + whiteM
                     black = blackK + blackM
 
-                    if bestmove == "gameover":
+                    if "score" in part and "win" in part["score"] and part["score"]["win"] == 0:
                         if self_playing:
                             losses += 1
                             logging.log(PROGRESS, "Game %d: %d moves - loss in %0.3fs" % (i + 1, move_nr, time.time() - game_start))
@@ -930,6 +937,7 @@ class Worker(threading.Thread):
                                           get_engine_dir(self.conf))
 
         self.scan_info, _ = uci(self.scan)
+        self.scan_info.pop("country", None)
         logging.info("Started %s, threads: %s (%d), pid: %d",
                      self.scan_info.get("name", "Scan <?>"),
                      "+" * self.threads, self.threads, self.scan.pid)
@@ -1027,12 +1035,9 @@ class Worker(threading.Thread):
         result["analysis"] = [None for _ in range(len(moves) + 1)]
         start = last_progress_report = time.time()
 
-        set_variant_options(self.scan, variant)
-        setoption(self.scan, "Skill Level", 20)
-        setoption(self.scan, "UCI_AnalyseMode", True)
-        send(self.scan, "ucinewgame")
+        send(self.scan, "new-game")
 
-        nodes = job.get("nodes") or 3500000
+        nodes = job.get("nodes") or 4000000
         skip = job.get("skipPositions", [])
 
         num_positions = 0
@@ -1051,14 +1056,25 @@ class Worker(threading.Thread):
                         variant, self.job_name(job, ply))
 
             part = go(self.scan, job["position"], " ".join(moves[0:ply]),
-                      nodes=nodes, movetime=4000)
+                      nodes=nodes, movetime=4)
 
-            if "mate" not in part["score"] and "time" in part and part["time"] < 100:
+            if "win" not in part["score"] and "time" in part and part["time"] < 100:
                 logging.warning("Very low time reported: %d ms.", part["time"])
 
             if "nps" in part and part["nps"] >= 100000000:
                 logging.warning("Dropping exorbitant nps: %d", part["nps"])
                 del part["nps"]
+
+            if "pv" in part:
+                newmoves = []
+                for move in part["pv"].split(" "):
+                    if move.find("x") != -1:
+                        origdest = move.split("x")[:2]
+                    else:
+                        origdest = move.split("-")[:2]
+                    if len(origdest) == 2:
+                        newmoves.append("%02d%02d" % (int(origdest[0]), int(origdest[1])))
+                part["pv"] = " ".join(newmoves)
 
             self.nodes += part.get("nodes", 0)
             self.positions += 1
