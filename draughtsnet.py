@@ -515,12 +515,28 @@ def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None, ha
                         value += " " + parts[i][:-1]
                     if name_and_value[0] in ["nodes", "depth"]:
                         info[name_and_value[0]] = int(value)
-                    elif name_and_value[0] in ["score"]:
-                        info[name_and_value[0]] = { "cp": int(float(value)* 100) }
+                    elif name_and_value[0] == "score":
+                        score = int(float(value) * 100)
+                        if abs(score) > 9000:
+                            if score > 0:
+                                ply = 10000 - score
+                            else:
+                                ply = -(10000 + score)
+                            info["score"] = { "win": int((ply + ply % 2) / 2) }
+                            if nodes is not None:
+                                send(p, "stop")
+                        elif abs(score) > 8000:
+                            if score > 0:
+                                ply = 9000 - score
+                            else:
+                                ply = -(9000 + score)
+                            info["score"] = { "win": int((ply + ply % 2) / 2) }
+                        else:
+                            info["score"] = { "cp": score }
                     elif name_and_value[0] == "time":
-                        info[name_and_value[0]] = int(float(value) * 1000)
+                        info["time"] = int(float(value) * 1000)
                     elif name_and_value[0] == "nps":
-                        info[name_and_value[0]] = round(float(value))
+                        info["nps"] = round(float(value))
                     elif name_and_value[0] != "mean-depth":
                         info[name_and_value[0]] = value
                     if name_and_value[0] == "nodes":
