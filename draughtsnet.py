@@ -519,18 +519,22 @@ def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None, ha
                         score = int(float(value) * 100)
                         if abs(score) > 9000:
                             if score > 0:
-                                ply = 10000 - score
+                                plies = 10000 - score
+                                moves = int((plies + plies % 2) / 2)
                             else:
-                                ply = -(10000 + score)
-                            info["score"] = { "win": int((ply + ply % 2) / 2) }
+                                plies = -(10000 + score)
+                                moves = int((plies - plies % 2) / 2)
+                            info["score"] = { "win": moves }
                             if nodes is not None:
                                 send(p, "stop")
                         elif abs(score) > 8000:
                             if score > 0:
-                                ply = 9000 - score
+                                plies = 9000 - score
+                                moves = int((plies + plies % 2) / 2)
                             else:
-                                ply = -(9000 + score)
-                            info["score"] = { "win": int((ply + ply % 2) / 2) }
+                                plies = -(9000 + score)
+                                moves = int((plies - plies % 2) / 2)
+                            info["score"] = { "win": moves }
                         else:
                             info["score"] = { "cp": score }
                     elif name_and_value[0] == "time":

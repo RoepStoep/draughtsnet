@@ -1,5 +1,7 @@
 venv
 draughtsnet.ini
+draughtsnet_dev.ini
+draughtsnet_prod.ini
 *.py[cd]
 .coverage
 build/
