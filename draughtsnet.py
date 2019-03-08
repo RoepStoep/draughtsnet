@@ -558,13 +558,15 @@ def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None, ha
             send(p, "stop")
 
 
-def set_variant_options(p, variant):
+def parse_variant(variant):
     variant = variant.lower()
 
     if variant in ["standard", "fromposition"]:
-        setoption(p, "variant", "normal")
+        return "normal"
+    elif variant == "breakthrough":
+        return "bt"
     else:
-        setoption(p, "variant", variant)
+        return variant
 
 
 class ProgressReporter(threading.Thread):
@@ -631,7 +633,7 @@ class Worker(threading.Thread):
         self.positions = 0
 
         self.scan_lock = threading.RLock()
-        self.scan = None
+        self.scan = {}
         self.scan_info = None
 
         self.job = None
@@ -680,7 +682,8 @@ class Worker(threading.Thread):
         try:
 
             # Check if the engine is still alive and start, if necessary
-            self.start_scan()
+            variant = parse_variant("standard")
+            self.start_scan(variant)
 
             logging.info(" ### Playing %d games against self, level %d",
                          self.selfplay_rounds, self.selfplay)
@@ -701,7 +704,7 @@ class Worker(threading.Thread):
                 self_playing = random.choice([True, False])
                 while self.is_alive():
 
-                    send(self.scan, "new-game")
+                    send(self.scan[variant], "new-game")
 
                     if self_playing:
                         move_level = self.selfplay - 1
@@ -711,7 +714,7 @@ class Worker(threading.Thread):
                     movetime = round(LVL_MOVETIMES[move_level] / (1000 * self.threads * 0.9 ** (self.threads - 1)), 2)
 
                     start = time.time()
-                    part = go(self.scan, pos, moves,
+                    part = go(self.scan[variant], pos, moves,
                               movetime=movetime, clock=None,
                               depth=LVL_DEPTHS[move_level], handicap=LVL_HANDICAPS[move_level])
                     end = time.time()
@@ -853,7 +856,8 @@ class Worker(threading.Thread):
     def run_inner(self):
         try:
             # Check if the engine is still alive and start, if necessary
-            self.start_scan()
+            self.start_scan(parse_variant("standard"))
+            self.start_scan(parse_variant("breakthrough"))
 
             # Do the next work unit
             path, request = self.work()
@@ -941,31 +945,33 @@ class Worker(threading.Thread):
         with self.scan_lock:
             if self.scan:
                 try:
-                    kill_process(self.scan)
+                    for _, value in self.scan:
+                        kill_process(value)
                 except OSError:
                     logging.exception("Failed to kill engine process.")
-                self.scan = None
+                self.scan = {}
 
-    def start_scan(self):
+    def start_scan(self, variant):
         with self.scan_lock:
             # Check if already running.
-            if self.scan and self.scan.poll() is None:
+            if variant in self.scan and self.scan[variant].poll() is None:
                 return
 
             # Start process
-            self.scan = open_process(get_scan_command(self.conf, False),
+            self.scan[variant] = open_process(get_scan_command(self.conf, False),
                                           get_engine_dir(self.conf))
 
-        self.scan_info, _ = uci(self.scan)
+        self.scan_info, _ = uci(self.scan[variant])
         self.scan_info.pop("country", None)
         logging.info("Started %s, threads: %s (%d), pid: %d",
                      self.scan_info.get("name", "Scan <?>"),
-                     "+" * self.threads, self.threads, self.scan.pid)
+                     "+" * self.threads, self.threads, self.scan[variant].pid)
 
         # Prepare UCI options
         self.scan_info["options"] = {}
         self.scan_info["options"]["threads"] = str(self.threads)
         self.scan_info["options"]["tt-size"] = str(math.floor(math.log(self.memory * 1024 * 1024 / 16, 2)))
+        self.scan_info["options"]["variant"] = parse_variant(variant)
 
         # Custom options
         if self.conf.has_section("Scan"):
@@ -974,9 +980,9 @@ class Worker(threading.Thread):
 
         # Set UCI options
         for name, value in self.scan_info["options"].items():
-            setoption(self.scan, name, value)
+            setoption(self.scan[variant], name, value)
 
-        init(self.scan)
+        init(self.scan[variant])
 
     def make_request(self):
         return {
@@ -1017,18 +1023,18 @@ class Worker(threading.Thread):
 
     def bestmove(self, job):
         lvl = job["work"]["level"]
-        variant = job.get("variant", "standard")
+        variant = parse_variant(job.get("variant", "standard"))
         moves = job["moves"]
 
         logging.debug("Playing %s (%s) with lvl %d",
                       self.job_name(job), variant, lvl)
 
-        send(self.scan, "new-game")
+        send(self.scan[variant], "new-game")
 
         movetime = round(LVL_MOVETIMES[lvl - 1] / (1000 * self.threads * 0.9 ** (self.threads - 1)), 2)
 
         start = time.time()
-        part = go(self.scan, job["position"], moves,
+        part = go(self.scan[variant], job["position"], moves,
                   movetime=movetime, clock=job["work"].get("clock"),
                   depth=LVL_DEPTHS[lvl - 1], handicap = LVL_HANDICAPS[lvl - 1])
         end = time.time()
@@ -1048,14 +1054,14 @@ class Worker(threading.Thread):
         return result
 
     def analysis(self, job):
-        variant = job.get("variant", "standard")
+        variant = parse_variant(job.get("variant", "standard"))
         moves = job["moves"].split(" ")
 
         result = self.make_request()
         result["analysis"] = [None for _ in range(len(moves) + 1)]
         start = last_progress_report = time.time()
 
-        send(self.scan, "new-game")
+        send(self.scan[variant], "new-game")
 
         nodes = job.get("nodes") or 4000000
         skip = job.get("skipPositions", [])
@@ -1075,7 +1081,7 @@ class Worker(threading.Thread):
             logging.log(PROGRESS, "Analysing %s: %s",
                         variant, self.job_name(job, ply))
 
-            part = go(self.scan, job["position"], " ".join(moves[0:ply]),
+            part = go(self.scan[variant], job["position"], " ".join(moves[0:ply]),
                       nodes=nodes, movetime=4)
 
             if "win" not in part["score"] and "time" in part and part["time"] < 100:
@@ -1347,7 +1353,7 @@ def validate_scan_command(scan_command, conf):
 
     logging.debug("Supported variants: %s", ", ".join(variants))
 
-    required_variants = set(["normal"])
+    required_variants = set(["normal", "bt"])
     missing_variants = required_variants.difference(variants)
     if missing_variants:
         raise ConfigError("Ensure you are using Scan 3.0. "
