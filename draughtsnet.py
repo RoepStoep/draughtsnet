@@ -1057,6 +1057,18 @@ class Worker(threading.Thread):
         variant = parse_variant(job.get("variant", "standard"))
         moves = job["moves"].split(" ")
 
+        # Analyzing breakthrough positions beyond promotion can crash scan
+        if variant == "bt" and len(moves) > 1:
+            move = moves[-1]
+            if move.find("x") != -1:
+                origdest = move.split("x")[:2]
+            else:
+                origdest = move.split("-")[:2]
+            # Exclude last move if piece ends on promotion square
+            if len(origdest) == 2 and \
+                    origdest[1] in ["1", "01", "2", "02", "3", "03", "4", "04", "5", "05", "46", "47", "48", "49", "50"]:
+                moves = moves[:-1]
+
         result = self.make_request()
         result["analysis"] = [None for _ in range(len(moves) + 1)]
         start = last_progress_report = time.time()
