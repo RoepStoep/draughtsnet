@@ -945,7 +945,7 @@ class Worker(threading.Thread):
         with self.scan_lock:
             if self.scan:
                 try:
-                    for _, value in self.scan:
+                    for _, value in self.scan.items():
                         kill_process(value)
                 except OSError:
                     logging.exception("Failed to kill engine process.")
