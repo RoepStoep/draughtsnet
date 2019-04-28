@@ -1000,6 +1000,9 @@ class Worker(threading.Thread):
         if self.job and self.job["work"]["type"] == "analysis":
             result = self.analysis(self.job)
             return "analysis" + "/" + self.job["work"]["id"], result
+        elif self.job and self.job["work"]["type"] == "commentary":
+            result = self.commentary(self.job)
+            return "commentary" + "/" + self.job["work"]["id"], result
         elif self.job and self.job["work"]["type"] == "move":
             result = self.bestmove(self.job)
             return "move" + "/" + self.job["work"]["id"], result
@@ -1131,7 +1134,44 @@ class Worker(threading.Thread):
 
         return result
 
+    def commentary(self, job):
+        variant = parse_variant(job.get("variant", "standard"))
+        moves = job["moves"]
 
+        logging.debug("Commentary on %s (%s)", self.job_name(job), variant)
+
+        send(self.scan[variant], "new-game")
+        
+        nodes = job.get("nodes") or 10000000
+        
+        start = time.time()
+        part = go(self.scan[variant], job["position"], moves,
+                  nodes=nodes, movetime=5)
+        end = time.time()
+
+        logging.log(PROGRESS, "Commentary in %s (%s): %0.3fs elapsed, depth %d",
+                    self.job_name(job), variant,
+                    end - start, part.get("depth", 0))
+        
+        if "pv" in part:
+            newmoves = []
+            for move in part["pv"].split(" "):
+                if move.find("x") != -1:
+                    origdest = move.split("x")[:2]
+                else:
+                    origdest = move.split("-")[:2]
+                if len(origdest) == 2:
+                    newmoves.append("%02d%02d" % (int(origdest[0]), int(origdest[1])))
+            part["pv"] = " ".join(newmoves)
+        
+        self.nodes += part.get("nodes", 0)
+        self.positions += 1
+        
+        result = self.make_request()
+        result["commentary"] = part
+        
+        return result
+		
 def detect_cpu_capabilities():
     # Detects support for popcnt and pext instructions
     vendor, modern, bmi2 = "", False, False
