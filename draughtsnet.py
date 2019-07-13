@@ -18,7 +18,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-"""Distributed Scan 3.0 analysis for lidraughts.org"""
+"""Distributed Scan 3.1 analysis for lidraughts.org"""
 
 from __future__ import print_function
 from __future__ import division
@@ -105,21 +105,47 @@ __license__ = "GPLv3+"
 DEFAULT_ENDPOINT = "https://lidraughts.org/draughtsnet/"
 DEFAULT_THREADS = 1
 HASH_MIN = 16
-HASH_DEFAULT = 256
-HASH_MAX = 512
+HASH_DEFAULT = 64
+HASH_MAX = 256
 MAX_BACKOFF = 30.0
 MAX_FIXED_BACKOFF = 1.0
 HTTP_TIMEOUT = 15.0
 STAT_INTERVAL = 60.0
 DEFAULT_CONFIG = "draughtsnet.ini"
 PROGRESS_REPORT_INTERVAL = 5.0
-LVL_MOVETIMES = [50, 100, 150, 200, 300, 400, 500, 1000]
-LVL_DEPTHS = [2, 3, 4, 5, 6, 8, 11, 18]
-LVL_HANDICAPS = [3, 3, 3, 2, 2, 1, 0, 0]
+
+# same for all
+LVL_MOVETIMES =    [50,  100,  150,  200,  300,  400,  500, 1000]
+LVL_BOOK_PLY = 	   [4,   4,    4,    4,    6,    6,    8,   8   ]
+LVL_BOOK_MARGIN =  [100, 100,  90,   90,   80,   70,   60,  50  ]
+
+# normal / bt - more or less similar
+LVL_DEPTHS = 	   [0,   0,    0,    0,    6,    5,    11,  21  ]
+LVL_NODES = 	   [50,  120,  400,  1200, 0,    0,    0,   0   ]
+LVL_PST = 		   [1,   1,    1,    1,    1,    0,    0,   0   ]
+LVL_HANDICAPS =    [3,   2,    0,    0,    0,    0,    0,   0   ]
+
+# frisian - more tactical, less nodes
+LVL_DEPTHS_FR =    [0,   0,    0,    0,    0,    0,    9,   21  ]
+LVL_NODES_FR = 	   [20,  50,   150,  450,  2200, 4400, 0,   0   ]
+LVL_HANDICAPS_FR = [3,   3,    3,    2,    2,    0,    0,   0   ]
+
+# frysk - more nodes to prevent suicide pieces and free promotions
+LVL_DEPTHS_FY =    [0,   0,    0,    0,    0,    0,    11,  21  ]
+LVL_NODES_FY = 	   [50,  200,  600,  1800, 2400, 9600, 0,   0   ]
+LVL_HANDICAPS_FY = [3,   3,    2,    2,    2,    2,    0,   0   ]
+LVL_PST_FY = 	   [1,   1,    1,    1,    0,    0,    0,   0   ]
+
+# losing - too tactical, node limits lead to random play, uses ply limits
+LVL_DEPTHS_L = 	   [3,   4,    5,    6,    8,    10,   12,  19  ]
+LVL_PLY_L = 	   [4,   5,    7,    8,    11,   14,   17,  0   ]
+LVL_PST_L = 	   [1,   1,    1,    0,    0,    0,    0,   0   ]
+LVL_HANDICAPS_L =  [0,   0,    0,    0,    0,    0,    0,   0   ]
+LVL_NODES_L = 	   [0,   0,    0,    0,    0,    0,    0,   0   ]
 
 
 def intro():
-    return "Draughtsnet %s - Distributed Scan 3.0 analysis for lidraughts.org" % __version__
+    return "Draughtsnet %s - Distributed Scan 3.1 analysis for lidraughts.org" % __version__
 
 
 PROGRESS = 15
@@ -431,15 +457,32 @@ def setoption(p, name, value):
     send(p, "set-param name=%s value=%s" % (name, value))
 
 
-def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None, handicap=None):
+def go(p, position, moves, movetime=None, clock=None, depth=None, analysisnodes=None, handicap=None, pst=None, searchnodes=None, bookply=None, bookmargin=None, ply=None):
     if moves and len(moves) != 0:
         send(p, "pos pos=%s moves=\"%s\"" % (position, moves))
     else:
         send(p, "pos pos=%s" % position)
 
     if handicap is not None and handicap > 0:
-        send(p, "level handicap=%s" % handicap)
+        send(p, "level handicap=%s" % str(handicap))
+    if ply is not None and ply > 0:
+        send(p, "level ply=%s" % str(ply))
+    if searchnodes is not None and searchnodes > 0:
+        send(p, "level nodes=%s" % str(searchnodes))    
+		
+    if pst is not None and pst > 0:
+        send(p, "set-param name=eval value=pst")
+    else:
+        send(p, "set-param name=eval value=pattern")
 
+    if bookmargin is not None:
+        send(p, "set-param name=book-margin value=%s" % str(bookmargin))
+
+    if bookply is not None:
+        send(p, "set-param name=book-ply value=%s" % str(bookply))
+    else:
+        send(p, "set-param name=book-ply value=0")
+		
     if movetime is not None and clock is not None:
         if position[0] == 'B':
             timeleft = clock["btime"] / 100.0
@@ -451,15 +494,16 @@ def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None, ha
         elif increment == 1 and timeleft < 6.0:
             movetime *= (timeleft / 6.0)
 
-    if nodes is not None and movetime is None:
+    if analysisnodes is not None and movetime is None:
         movetime = 4 # If no movetime is specified, allow 4 seconds to reach the required amount of nodes
 
-    if depth is not None:
+    if depth is not None and depth > 0:
         send(p, "level depth=%s" % str(depth))
     if movetime is not None:
         send(p, "level move-time=%s" % str(movetime))
 
-    if nodes is not None:
+    if analysisnodes is not None:
+        send(p, "level nodes=%s" % str(analysisnodes))
         send(p, "go analyze")
     else:
         send(p, "go think")
@@ -500,6 +544,7 @@ def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None, ha
 
             # Parse all other parameters
             cur_nodes = 0
+            cur_depth = 0
             parts = arg.split()
             i = 0
             while i < len(parts):
@@ -525,8 +570,6 @@ def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None, ha
                                 plies = -(10000 + score)
                                 moves = int((plies - plies % 2) / 2)
                             info["score"] = { "win": moves }
-                            if nodes is not None:
-                                send(p, "stop")
                         elif abs(score) > 8000:
                             if score > 0:
                                 plies = 9000 - score
@@ -545,10 +588,12 @@ def go(p, position, moves, movetime=None, clock=None, depth=None, nodes=None, ha
                         info[name_and_value[0]] = value
                     if name_and_value[0] == "nodes":
                         cur_nodes = int(value)
+                    if name_and_value[0] == "depth":
+                        cur_depth = int(value)
                 i += 1
 
-            # Check if we have reached the node count
-            if nodes is not None and cur_nodes >= nodes:
+            # Check if we have reached the node count for analysis
+            if analysisnodes is not None and (cur_nodes > analysisnodes or cur_depth > 50):
                 forcestop = True
         else:
             logging.warning("Unexpected engine response to go: %s %s", command, arg)
@@ -565,6 +610,10 @@ def parse_variant(variant):
         return "normal"
     elif variant == "breakthrough":
         return "bt"
+    elif variant == "antidraughts":
+        return "losing"
+    elif variant == "frysk":
+        return "frisian"
     else:
         return variant
 
@@ -858,7 +907,9 @@ class Worker(threading.Thread):
             # Check if the engine is still alive and start, if necessary
             self.start_scan(parse_variant("standard"))
             self.start_scan(parse_variant("breakthrough"))
-
+            self.start_scan(parse_variant("frisian"))
+            self.start_scan(parse_variant("antidraughts"))
+			
             # Do the next work unit
             path, request = self.work()
         except DEAD_ENGINE_ERRORS:
@@ -968,11 +1019,14 @@ class Worker(threading.Thread):
                      "+" * self.threads, self.threads, self.scan[variant].pid)
 
         # Prepare UCI options
+        scan_variant = parse_variant(variant)
         self.scan_info["options"] = {}
         self.scan_info["options"]["threads"] = str(self.threads)
         self.scan_info["options"]["tt-size"] = str(math.floor(math.log(self.memory * 1024 * 1024 / 16, 2)))
-        self.scan_info["options"]["variant"] = parse_variant(variant)
-
+        self.scan_info["options"]["variant"] = scan_variant
+        if scan_variant == "frisian":
+            self.scan_info["options"]["bb-size"] = 4
+			
         # Custom options
         if self.conf.has_section("Scan"):
             for name, value in self.conf.items("Scan"):
@@ -1035,11 +1089,41 @@ class Worker(threading.Thread):
         send(self.scan[variant], "new-game")
 
         movetime = round(LVL_MOVETIMES[lvl - 1] / (1000 * self.threads * 0.9 ** (self.threads - 1)), 2)
-
+        
+        if job.get("variant", "standard") == "frysk":
+            pst = LVL_PST_FY[lvl - 1]
+            handicap = LVL_HANDICAPS_FY[lvl - 1]
+            depth = LVL_DEPTHS_FY[lvl - 1]
+            ply = 0
+            # frysk "opening book"
+            if job["position"] == "Wbbbbbeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeewwwww" and len(job["moves"].split(" ")) < 4: 
+                searchnodes = 1
+            else:
+                searchnodes = LVL_NODES_FY[lvl - 1]
+        elif variant == "frisian":
+            pst = LVL_PST[lvl - 1]
+            handicap = LVL_HANDICAPS_FR[lvl - 1]
+            depth = LVL_DEPTHS_FR[lvl - 1]
+            ply = 0
+            searchnodes = LVL_NODES_FR[lvl - 1]
+        elif variant == "losing":
+            pst = LVL_PST_L[lvl - 1]
+            handicap = LVL_HANDICAPS_L[lvl - 1]
+            depth = LVL_DEPTHS_L[lvl - 1]
+            ply = LVL_PLY_L[lvl - 1]
+            searchnodes = LVL_NODES_L[lvl - 1]
+        else:
+            pst = LVL_PST[lvl - 1]
+            handicap = LVL_HANDICAPS[lvl - 1]
+            depth = LVL_DEPTHS[lvl - 1]
+            ply = 0
+            searchnodes = LVL_NODES[lvl - 1]
+				
         start = time.time()
         part = go(self.scan[variant], job["position"], moves,
                   movetime=movetime, clock=job["work"].get("clock"),
-                  depth=LVL_DEPTHS[lvl - 1], handicap = LVL_HANDICAPS[lvl - 1])
+                  depth=depth, handicap=handicap, pst=pst, searchnodes=searchnodes, 
+                  bookply=LVL_BOOK_PLY[lvl - 1], bookmargin=LVL_BOOK_MARGIN[lvl - 1], ply=ply)
         end = time.time()
 
         logging.log(PROGRESS, "Played move in %s (%s) with lvl %d: %0.3fs elapsed, depth %d",
@@ -1078,7 +1162,7 @@ class Worker(threading.Thread):
 
         send(self.scan[variant], "new-game")
 
-        nodes = job.get("nodes") or 4000000
+        analysisnodes = job.get("nodes") or 5000000
         skip = job.get("skipPositions", [])
 
         num_positions = 0
@@ -1097,7 +1181,7 @@ class Worker(threading.Thread):
                         variant, self.job_name(job, ply))
 
             part = go(self.scan[variant], job["position"], " ".join(moves[0:ply]),
-                      nodes=nodes, movetime=4)
+                      analysisnodes=analysisnodes, movetime=4)
 
             if "win" not in part["score"] and "time" in part and part["time"] < 100:
                 logging.warning("Very low time reported: %d ms.", part["time"])
@@ -1142,11 +1226,11 @@ class Worker(threading.Thread):
 
         send(self.scan[variant], "new-game")
         
-        nodes = job.get("nodes") or 10000000
+        analysisnodes = job.get("nodes") or 6000000
         
         start = time.time()
         part = go(self.scan[variant], job["position"], moves,
-                  nodes=nodes, movetime=5)
+                  analysisnodes=analysisnodes, movetime=5)
         end = time.time()
 
         logging.log(PROGRESS, "Commentary in %s (%s): %0.3fs elapsed, depth %d",
@@ -1405,10 +1489,10 @@ def validate_scan_command(scan_command, conf):
 
     logging.debug("Supported variants: %s", ", ".join(variants))
 
-    required_variants = set(["normal", "bt"])
+    required_variants = set(["normal", "bt", "frisian", "losing"])
     missing_variants = required_variants.difference(variants)
     if missing_variants:
-        raise ConfigError("Ensure you are using Scan 3.0. "
+        raise ConfigError("Ensure you are using Scan 3.1. "
                           "Unsupported variants: %s" % ", ".join(missing_variants))
 
     return scan_command
@@ -1584,7 +1668,7 @@ def cmd_run(args):
 
     scan_command = validate_scan_command(conf_get(conf, "ScanCommand"), conf)
     if not scan_command:
-        raise ConfigError("Ensure you are using Scan 3.0. "
+        raise ConfigError("Ensure you are using Scan 3.1. "
                           "Invalid command: %s" % scan_command)
 
     print()
@@ -1704,7 +1788,7 @@ def cmd_selfplay(args):
 
     scan_command = validate_scan_command(conf_get(conf, "ScanCommand"), conf)
     if not scan_command:
-        raise ConfigError("Ensure you are using Scan 3.0. "
+        raise ConfigError("Ensure you are using Scan 3.1. "
                           "Invalid command: %s" % scan_command)
 
     print()
